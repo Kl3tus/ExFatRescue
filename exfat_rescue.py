@@ -5,13 +5,27 @@ import time
 import re
 import threading
 import queue
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 # ==============================================================================
 # ExFatRescue - Open Source exFAT Raw File & Project Recovery Tool
 # Special support for Godot projects, source code, 3D assets, and media
+# Author: Mikel Bryan (Kl3tus)
 # ==============================================================================
+
+def get_resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath(os.path.dirname(__file__)), relative_path)
 
 CATEGORY_MAP = {
     'Godot / Game': ['.godot', '.gd', '.tscn', '.tres', '.import', '.gdextension', '.shader'],
@@ -109,8 +123,8 @@ class ExFatRescueApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ExFatRescue - exFAT Lost File & Project Recovery")
-        self.root.geometry("1100x720")
-        self.root.minsize(900, 600)
+        self.root.geometry("1120x740")
+        self.root.minsize(920, 620)
         
         # Color palette
         self.c_bg = "#181824"
@@ -120,6 +134,7 @@ class ExFatRescueApp:
         self.c_accent_hover = "#5c91ff"
         self.c_success = "#10b981"
         self.c_danger = "#ef4444"
+        self.c_donate = "#e11d48"
         self.c_text = "#f3f4f6"
         self.c_text_dim = "#9ca3af"
         
@@ -184,8 +199,15 @@ class ExFatRescueApp:
         lbl_title = tk.Label(header, text="🛡️ ExFatRescue", font=("Segoe UI", 18, "bold"), fg=self.c_text, bg=self.c_bg)
         lbl_title.pack(side=tk.LEFT)
         
-        lbl_sub = tk.Label(header, text="  Raw exFAT Lost Project & File Extractor (Free & Open Source)", font=("Segoe UI", 11), fg=self.c_text_dim, bg=self.c_bg)
+        lbl_sub = tk.Label(header, text="  Raw exFAT Lost Project & File Extractor", font=("Segoe UI", 11), fg=self.c_text_dim, bg=self.c_bg)
         lbl_sub.pack(side=tk.LEFT, pady=4)
+        
+        # Header Right: Donate & GitHub buttons
+        btn_donate = tk.Button(header, text="💖 Donate / Sponsor", command=self.show_donation_dialog, bg=self.c_donate, fg="#ffffff", font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=12, pady=4, cursor="hand2")
+        btn_donate.pack(side=tk.RIGHT, padx=4)
+        
+        btn_gh = tk.Button(header, text="⭐ GitHub", command=lambda: webbrowser.open("https://github.com/Kl3tus/ExFatRescue"), bg="#2d2d40", fg=self.c_text, font=("Segoe UI", 9), relief=tk.FLAT, padx=10, pady=4, cursor="hand2")
+        btn_gh.pack(side=tk.RIGHT, padx=4)
         
         # Configuration Card
         config_card = tk.Frame(self.root, bg=self.c_card, bd=1, relief=tk.SOLID, padx=16, pady=12)
@@ -299,6 +321,40 @@ class ExFatRescueApp:
     # Logic & Event Handlers
     # ==========================================================================
     
+    def show_donation_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("💖 Support ExFatRescue")
+        dialog.geometry("380x420")
+        dialog.configure(bg="#141824")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="💖 Support Open Source", bg="#141824", fg="#f43f5e", font=("Segoe UI", 14, "bold")).pack(pady=(16, 4))
+        tk.Label(dialog, text="ExFatRescue is 100% free and open-source.\nIf it saved your projects, donations are deeply appreciated!", bg="#141824", fg="#94a3b8", font=("Segoe UI", 9), justify="center").pack(padx=20)
+
+        qr_frame = tk.Frame(dialog, bg="#1e2538", bd=1, relief="solid")
+        qr_frame.pack(pady=12, padx=30, fill="x")
+
+        qr_path = get_resource_path("paypal_qr.png")
+        if os.path.exists(qr_path) and HAS_PIL:
+            try:
+                qr_pil = Image.open(qr_path).resize((180, 180), Image.Resampling.LANCZOS)
+                qr_photo = ImageTk.PhotoImage(qr_pil)
+                lbl_qr = tk.Label(qr_frame, image=qr_photo, bg="#1e2538")
+                lbl_qr.image = qr_photo
+                lbl_qr.pack(pady=10)
+            except Exception:
+                tk.Label(qr_frame, text="[PayPal QR Code]", bg="#1e2538", fg="#cbd5e1").pack(pady=20)
+        else:
+            tk.Label(qr_frame, text="[PayPal QR Code]", bg="#1e2538", fg="#cbd5e1").pack(pady=20)
+
+        tk.Label(qr_frame, text="Scan with PayPal app or camera", bg="#1e2538", fg="#f1f5f9", font=("Segoe UI", 10, "bold")).pack()
+        
+        btn_pp = tk.Button(qr_frame, text="🔗 Open PayPal (paypal.me/Kl3tus)", bg="#0284c7", fg="#ffffff", font=("Segoe UI", 10, "bold"), relief="flat", padx=12, pady=5, cursor="hand2",
+                           command=lambda: webbrowser.open("https://paypal.me/Kl3tus"))
+        btn_pp.pack(pady=(8, 14))
+
     def browse_destination(self):
         chosen = filedialog.askdirectory(initialdir=self.output_dir_var.get())
         if chosen:
@@ -394,7 +450,6 @@ class ExFatRescueApp:
             ))
             
     def sort_tree(self, col, reverse):
-        # Sort items in memory and re-render
         if col == "name":
             self.discovered_items.sort(key=lambda x: x['name'].lower(), reverse=reverse)
         elif col == "size":
@@ -404,7 +459,6 @@ class ExFatRescueApp:
         elif col == "category":
             self.discovered_items.sort(key=lambda x: x['category'], reverse=reverse)
             
-        # Re-index selection
         self.filter_tree_display()
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
         

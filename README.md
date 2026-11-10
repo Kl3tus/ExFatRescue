@@ -44,10 +44,26 @@ python exfat_rescue.py
 
 Run `build.bat` or compile with PyInstaller:
 ```cmd
-pyinstaller --onefile --uac-admin --noconsole --name "ExFatRescue" exfat_rescue.py
+pyinstaller --onefile --uac-admin --noconsole --add-data "paypal_qr.png;." --name "ExFatRescue" exfat_rescue.py
 ```
 
 ---
 
+## 💖 Support & Donations
+
+If **ExFatRescue** saved your projects, code, or personal data and you would like to support future open-source development, donations are deeply appreciated!
+
+<div align="center">
+  <img src="paypal_qr.png" alt="PayPal QR Code" width="200" />
+  <br/><br/>
+  <a href="https://paypal.me/Kl3tus">
+    <img src="https://img.shields.io/badge/Donate-PayPal-blue.svg?style=for-the-badge&logo=paypal" alt="Donate with PayPal" />
+  </a>
+  <br/>
+  <b><a href="https://paypal.me/Kl3tus">paypal.me/Kl3tus</a></b>
+</div>
+
+---
+
 ## 📄 License
-MIT License. Free and open source for the community.
+MIT License. Free and open source for the community. Copyright (c) 2026 Mikel Bryan (Kl3tus).
