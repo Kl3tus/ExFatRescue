@@ -21,7 +21,7 @@ except ImportError:
 # ==============================================================================
 # ExFatRescue v1.2.0 - Production-Grade exFAT Raw File & Project Recovery Tool
 # Special support for Godot projects, source code, 3D assets, and media
-# Includes Interactive SpaceSniffer-style Visual Treemap & Hierarchical Explorer
+# Includes Interactive Visual Map (Proportional Disk Treemap) & Hierarchical Explorer
 # Author: Mikel Bryan (Kl3tus)
 # ==============================================================================
 
@@ -191,7 +191,7 @@ def parse_exfat_entry_set(buf, offset, max_disk_size):
     }
 
 # ==============================================================================
-# Squarified Treemap Algorithm (SpaceSniffer Layout)
+# Squarified Treemap Algorithm (Visual Map Layout)
 # ==============================================================================
 
 def squarify(children, rect):
@@ -382,7 +382,7 @@ class ExFatRescueApp:
         lbl_title = tk.Label(header, text="🛡️ ExFatRescue v1.2.0", font=("Segoe UI", 18, "bold"), fg=self.c_text, bg=self.c_bg)
         lbl_title.pack(side=tk.LEFT)
         
-        lbl_sub = tk.Label(header, text="  Raw exFAT File, Project & SpaceSniffer Visual Recovery Engine", font=("Segoe UI", 10), fg=self.c_text_dim, bg=self.c_bg)
+        lbl_sub = tk.Label(header, text="  Raw exFAT File, Project & Visual Map Recovery Engine", font=("Segoe UI", 10), fg=self.c_text_dim, bg=self.c_bg)
         lbl_sub.pack(side=tk.LEFT, pady=4)
         
         btn_donate = tk.Button(header, text="💖 Donate / Sponsor", command=self.show_donation_dialog, bg=self.c_donate, fg="#ffffff", font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=12, pady=4, cursor="hand2")
@@ -434,7 +434,7 @@ class ExFatRescueApp:
                                        bg=self.c_accent, fg="#ffffff", font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=14, pady=5, cursor="hand2")
         self.btn_view_list.pack(side=tk.LEFT, padx=(0, 4))
         
-        self.btn_view_map = tk.Button(view_tabs_frame, text="🗺️ SpaceSniffer Visual Map", command=lambda: self.switch_view("map"),
+        self.btn_view_map = tk.Button(view_tabs_frame, text="🗺️ Visual Map", command=lambda: self.switch_view("map"),
                                       bg="#222232", fg=self.c_text_dim, font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=14, pady=5, cursor="hand2")
         self.btn_view_map.pack(side=tk.LEFT, padx=(0, 4))
 
@@ -512,21 +512,21 @@ class ExFatRescueApp:
         
         self.view_list_frame.pack(fill=tk.BOTH, expand=True)
 
-        # ---------------- VIEW 2: SPACESNIFFER MAP ----------------
+        # ---------------- VIEW 2: VISUAL MAP ----------------
         self.view_map_frame = tk.Frame(self.center_container, bg=self.c_card, bd=1, relief=tk.SOLID)
         
         # Map Toolbar
         map_bar = tk.Frame(self.view_map_frame, bg="#1a1a27", padx=12, pady=6)
         map_bar.pack(fill=tk.X)
         
-        tk.Label(map_bar, text="🗺️ SpaceSniffer Visual Disk Map", font=("Segoe UI", 10, "bold"), fg=self.c_text, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 15))
+        tk.Label(map_bar, text="🗺️ Visual Disk Map", font=("Segoe UI", 10, "bold"), fg=self.c_text, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 15))
         
         tk.Label(map_bar, text="Group By:", font=("Segoe UI", 9, "bold"), fg=self.c_text_dim, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 6))
         for g_opt in ["Category", "Extension (.ext)", "Folder / Project"]:
-            tk.Radiobutton(map_bar, text=g_opt, value=g_opt, variable=self.map_group_var, command=self.render_spacesniffer_map,
+            tk.Radiobutton(map_bar, text=g_opt, value=g_opt, variable=self.map_group_var, command=self.render_visual_map,
                            bg="#1a1a27", fg=self.c_text, selectcolor="#2d2d42", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=4)
                            
-        self.btn_map_refresh = tk.Button(map_bar, text="🔄 Redraw Map", command=self.render_spacesniffer_map, bg="#2d2d42", fg=self.c_text, font=("Segoe UI", 8), relief=tk.FLAT, padx=8)
+        self.btn_map_refresh = tk.Button(map_bar, text="🔄 Redraw Map", command=self.render_visual_map, bg="#2d2d42", fg=self.c_text, font=("Segoe UI", 8), relief=tk.FLAT, padx=8)
         self.btn_map_refresh.pack(side=tk.RIGHT, padx=4)
         
         self.btn_map_sel = tk.Button(map_bar, text="✓ Select Group", command=self.select_active_map_group, bg="#4f46e5", fg="#ffffff", font=("Segoe UI", 8, "bold"), relief=tk.FLAT, padx=10)
@@ -535,10 +535,10 @@ class ExFatRescueApp:
         self.btn_map_filter = tk.Button(map_bar, text="🔍 Jump to Table", command=self.jump_map_to_table, bg="#0284c7", fg="#ffffff", font=("Segoe UI", 8, "bold"), relief=tk.FLAT, padx=10)
         self.btn_map_filter.pack(side=tk.RIGHT, padx=4)
 
-        # SpaceSniffer Canvas
+        # Visual Map Canvas
         self.map_canvas = tk.Canvas(self.view_map_frame, bg="#11111a", highlightthickness=0)
         self.map_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.map_canvas.bind("<Configure>", lambda e: self.render_spacesniffer_map())
+        self.map_canvas.bind("<Configure>", lambda e: self.render_visual_map())
         self.map_canvas.bind("<Motion>", self.on_map_hover)
         self.map_canvas.bind("<Button-1>", self.on_map_click)
         self.map_canvas.bind("<Double-Button-1>", lambda e: self.jump_map_to_table())
@@ -636,7 +636,7 @@ class ExFatRescueApp:
         self.btn_recover_all.pack(side=tk.RIGHT, padx=(0, 12))
 
     # ==========================================================================
-    # View Switching (Table / SpaceSniffer Map / Folder Tree)
+    # View Switching (Table / Visual Map / Folder Tree)
     # ==========================================================================
 
     def switch_view(self, view_name):
@@ -655,17 +655,17 @@ class ExFatRescueApp:
         elif view_name == "map":
             self.view_map_frame.pack(fill=tk.BOTH, expand=True)
             self.btn_view_map.config(bg=self.c_accent, fg="#ffffff")
-            self.root.after(30, self.render_spacesniffer_map)
+            self.root.after(30, self.render_visual_map)
         elif view_name == "tree":
             self.view_tree_frame.pack(fill=tk.BOTH, expand=True)
             self.btn_view_tree.config(bg=self.c_accent, fg="#ffffff")
             self.populate_folder_tree()
 
     # ==========================================================================
-    # SpaceSniffer Interactive Treemap Implementation
+    # Interactive Visual Treemap Implementation
     # ==========================================================================
 
-    def render_spacesniffer_map(self):
+    def render_visual_map(self):
         if self.active_view != "map":
             return
             
@@ -746,7 +746,7 @@ class ExFatRescueApp:
 
             pct = (tile['size'] / total_bytes) * 100
             
-            # Sub-blocks inside tile (SpaceSniffer style nested tiles)
+            # Sub-blocks inside tile (nested category tiles)
             if rw > 90 and rh > 65 and len(tile.get('ext_breakdown', {})) > 1:
                 inner_rect = (rx + 4, ry + 24, rw - 8, rh - 28)
                 sub_children = [{'name': ext if ext else 'raw', 'size': s, 'cat': cat}
@@ -1608,7 +1608,7 @@ class ExFatRescueApp:
                         self.lbl_footer_status.config(text=f"Scan paused/stopped. Checkpoint saved with {len(self.discovered_items):,} files. Click 'Resume' anytime or 'Recover' now.")
                     
                     if self.active_view == "map":
-                        self.render_spacesniffer_map()
+                        self.render_visual_map()
                     elif self.active_view == "tree":
                         self.populate_folder_tree()
                         

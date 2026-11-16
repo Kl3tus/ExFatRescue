@@ -15,7 +15,7 @@ Unlike traditional raw carvers (like PhotoRec) which destroy folder structures a
 ## ✨ Features
 
 - 🖥️ **Modern Dark-Themed GUI:** Clean Tkinter dark interface with real-time speed, progress, and file counters.
-- 🗺️ **Interactive SpaceSniffer Visual Disk Map:** Proportional squarified treemap visualizer showing data distribution across categories, extensions, or projects with live hover inspection and 1-click group extraction.
+- 🗺️ **Interactive Visual Map:** Proportional squarified treemap visualizer showing data distribution across categories, extensions, or projects with live hover inspection and 1-click group extraction.
 - 📁 **Hierarchical Folder Explorer:** Tree-based directory browser with folder size rollups and branch checkboxes.
 - 📦 **Dual 1-Click Recovery Modes:**
   - `📦 Recover ALL Files (Entire Drive)`: Dump all indexed files (~135+ GB) in 1 click without needing manual selection.
