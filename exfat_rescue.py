@@ -7,6 +7,7 @@ import json
 import threading
 import queue
 import webbrowser
+import bisect
 import ctypes
 import ctypes.wintypes
 import tkinter as tk
@@ -19,9 +20,9 @@ except ImportError:
     HAS_PIL = False
 
 # ==============================================================================
-# ExFatRescue v1.2.0 - Production-Grade exFAT Raw File & Project Recovery Tool
-# Special support for Godot projects, source code, 3D assets, and media
-# Includes Interactive Visual Map (Proportional Disk Treemap) & Hierarchical Explorer
+# ExFatRescue v1.3.0 - Production-Grade exFAT Raw File & Project Recovery Tool
+# Special support for Actual Discovered Folders, Godot/Unity game projects,
+# 3D assets, source code, and Interactive Visual Disk Map
 # Author: Mikel Bryan (Kl3tus)
 # ==============================================================================
 
@@ -30,22 +31,23 @@ CLUSTER_SIZE = 128 * 1024          # 128 KB standard cluster
 CLUSTER_HEAP_OFFSET = 32 * 1024 * 1024 # 32 MB cluster heap start
 
 CATEGORY_MAP = {
-    'Godot / Game': ['.godot', '.gd', '.tscn', '.tres', '.import', '.gdextension', '.shader'],
+    'Godot / Game': ['.godot', '.gd', '.tscn', '.tres', '.import', '.gdextension', '.shader', '.xnb', '.assets', '.ress', '.res', '.sav', '.xwb', '.mgfxo', '.bundle', '.pak'],
     '3D & Assets': ['.blend', '.blend1', '.fbx', '.obj', '.gltf', '.glb', '.dae', '.psd'],
-    'Code & Dev': ['.java', '.py', '.cpp', '.c', '.h', '.hpp', '.cs', '.kt', '.rs', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.gradle'],
-    'Archives': ['.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz', '.iso'],
+    'Code & Dev': ['.java', '.py', '.cpp', '.c', '.h', '.hpp', '.cs', '.kt', '.rs', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.gradle', '.dll', '.so', '.dylib', '.exe', '.config', '.ini', '.map'],
+    'Archives': ['.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz', '.iso', '.vdf'],
     'Media': ['.png', '.jpg', '.jpeg', '.webp', '.svg', '.gif', '.bmp', '.mp4', '.mkv', '.avi', '.mov', '.mp3', '.wav', '.ogg', '.flac'],
     'Documents': ['.pdf', '.txt', '.md', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.rtf']
 }
 
 CATEGORY_COLORS = {
+    '📁 Folder':    {'fill': '#1e293b', 'border': '#38bdf8', 'accent': '#7dd3fc', 'subfill': '#0f172a'},
     'Godot / Game': {'fill': '#064e3b', 'border': '#10b981', 'accent': '#34d399', 'subfill': '#04382a'},
     '3D & Assets':  {'fill': '#4c1d95', 'border': '#8b5cf6', 'accent': '#a78bfa', 'subfill': '#3b1675'},
     'Code & Dev':   {'fill': '#1e3a8a', 'border': '#3b82f6', 'accent': '#60a5fa', 'subfill': '#172e6d'},
     'Archives':     {'fill': '#78350f', 'border': '#f59e0b', 'accent': '#fbbf24', 'subfill': '#5c290c'},
     'Media':        {'fill': '#881337', 'border': '#f43f5e', 'accent': '#fb7185', 'subfill': '#660e29'},
-    'Documents':    {'fill': '#1e293b', 'border': '#64748b', 'accent': '#94a3b8', 'subfill': '#161f2e'},
-    'Other':        {'fill': '#1f2937', 'border': '#4b5563', 'accent': '#6b7280', 'subfill': '#18202c'}
+    'Documents':    {'fill': '#334155', 'border': '#94a3b8', 'accent': '#cbd5e1', 'subfill': '#1e293b'},
+    'Other':        {'fill': '#1f2937', 'border': '#4b5563', 'accent': '#9ca3af', 'subfill': '#111827'}
 }
 
 def get_resource_path(relative_path):
@@ -114,7 +116,9 @@ def format_size(bytes_val):
     else:
         return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
 
-def get_file_category(filename):
+def get_file_category(filename, is_dir=False):
+    if is_dir:
+        return '📁 Folder'
     ext = os.path.splitext(filename)[1].lower()
     for cat, exts in CATEGORY_MAP.items():
         if ext in exts:
@@ -284,7 +288,7 @@ def squarify(children, rect):
             cy = curr_y
             for it in current_row:
                 h = (it['size'] / r_size) * curr_h
-                results.append({**it, 'rect': (curr_x, cy, max(curr_w, 1), max(h, 1))})
+                results.append({**it, 'rect': (curr_x, cy, max(row_w, 1), max(h, 1))})
                 cy += h
 
     return results
@@ -296,7 +300,7 @@ def squarify(children, rect):
 class ExFatRescueApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("ExFatRescue v1.2.0 - exFAT Lost File & Project Recovery")
+        self.root.title("ExFatRescue v1.3.0 - exFAT Lost File & Project Recovery")
         self.root.geometry("1180x780")
         self.root.minsize(980, 660)
         
@@ -330,14 +334,22 @@ class ExFatRescueApp:
         self.output_dir_var = tk.StringVar(value=r"H:\SD Card\ExFatRescue_Output")
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", self.on_search_change)
+        
+        # Filter controls
         self.category_var = tk.StringVar(value="All")
-        self.map_group_var = tk.StringVar(value="Category")
+        self.item_type_filter_var = tk.StringVar(value="all") # "all", "folders_only", "files_only"
+        self.map_group_var = tk.StringVar(value="Actual Folders") # "Actual Folders", "Category", "Extension (.ext)"
+        self.folder_tree_mode_var = tk.StringVar(value="folders") # "folders", "categories"
         
         self.active_view = "list"  # "list", "map", "tree"
         self.search_debounce_timer = None
         self.hovered_tile = None
         self.active_tile_data = None
         self.rendered_tiles = []
+        
+        # Folder cache for instant lookup
+        self.cached_dir_names = set()
+        self.sorted_dir_items = []
         
         self.setup_styles()
         self.build_ui()
@@ -379,7 +391,7 @@ class ExFatRescueApp:
         header = tk.Frame(self.root, bg=self.c_bg, padx=20, pady=10)
         header.pack(fill=tk.X)
         
-        lbl_title = tk.Label(header, text="🛡️ ExFatRescue v1.2.0", font=("Segoe UI", 18, "bold"), fg=self.c_text, bg=self.c_bg)
+        lbl_title = tk.Label(header, text="🛡️ ExFatRescue v1.3.0", font=("Segoe UI", 18, "bold"), fg=self.c_text, bg=self.c_bg)
         lbl_title.pack(side=tk.LEFT)
         
         lbl_sub = tk.Label(header, text="  Raw exFAT File, Project & Visual Map Recovery Engine", font=("Segoe UI", 10), fg=self.c_text_dim, bg=self.c_bg)
@@ -438,7 +450,7 @@ class ExFatRescueApp:
                                       bg="#222232", fg=self.c_text_dim, font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=14, pady=5, cursor="hand2")
         self.btn_view_map.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_view_tree = tk.Button(view_tabs_frame, text="📁 Folder & Category Explorer", command=lambda: self.switch_view("tree"),
+        self.btn_view_tree = tk.Button(view_tabs_frame, text="📁 Folder Explorer", command=lambda: self.switch_view("tree"),
                                        bg="#222232", fg=self.c_text_dim, font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=14, pady=5, cursor="hand2")
         self.btn_view_tree.pack(side=tk.LEFT)
 
@@ -449,46 +461,55 @@ class ExFatRescueApp:
         # ---------------- VIEW 1: FILE LIST TABLE ----------------
         self.view_list_frame = tk.Frame(self.center_container, bg=self.c_bg)
         
-        # Filter & Search Toolbar
-        filter_bar = tk.Frame(self.view_list_frame, bg=self.c_bg, pady=4)
-        filter_bar.pack(fill=tk.X)
+        # Filter & Search Toolbar (Row 1: Type & Search)
+        filter_bar_top = tk.Frame(self.view_list_frame, bg=self.c_bg, pady=2)
+        filter_bar_top.pack(fill=tk.X)
         
-        tk.Label(filter_bar, text="Category:", fg=self.c_text, bg=self.c_bg, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
-        
-        categories = ["All", "Godot / Game", "3D & Assets", "Code & Dev", "Archives", "Media", "Documents"]
-        for cat in categories:
-            rb = tk.Radiobutton(filter_bar, text=cat, value=cat, variable=self.category_var, command=self.filter_tree_display,
+        tk.Label(filter_bar_top, text="Display Filter:", fg=self.c_text, bg=self.c_bg, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        for t_label, t_val in [("All Items", "all"), ("📁 Actual Folders Only", "folders_only"), ("📄 Files Only", "files_only")]:
+            rb = tk.Radiobutton(filter_bar_top, text=t_label, value=t_val, variable=self.item_type_filter_var, command=self.filter_tree_display,
                                 bg=self.c_bg, fg=self.c_text, selectcolor=self.c_card, activebackground=self.c_bg, activeforeground=self.c_accent, font=("Segoe UI", 9))
             rb.pack(side=tk.LEFT, padx=3)
             
         # Search Box
-        tk.Label(filter_bar, text="Search:", fg=self.c_text, bg=self.c_bg, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(10, 4))
-        ent_search = tk.Entry(filter_bar, textvariable=self.search_var, bg=self.c_card, fg=self.c_text, insertbackground=self.c_text, relief=tk.FLAT, width=15, font=("Segoe UI", 9))
+        tk.Label(filter_bar_top, text="Search:", fg=self.c_text, bg=self.c_bg, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(12, 4))
+        ent_search = tk.Entry(filter_bar_top, textvariable=self.search_var, bg=self.c_card, fg=self.c_text, insertbackground=self.c_text, relief=tk.FLAT, width=16, font=("Segoe UI", 9))
         ent_search.pack(side=tk.LEFT)
         
         # Selection Controls in Toolbar
-        btn_desel = tk.Button(filter_bar, text="Deselect All", command=self.deselect_all, bg="#2a2a3d", fg=self.c_text, relief=tk.FLAT, padx=7, font=("Segoe UI", 8))
+        btn_desel = tk.Button(filter_bar_top, text="Deselect All", command=self.deselect_all, bg="#2a2a3d", fg=self.c_text, relief=tk.FLAT, padx=7, font=("Segoe UI", 8))
         btn_desel.pack(side=tk.RIGHT)
         
-        btn_sel_vis = tk.Button(filter_bar, text="Select Visible", command=self.select_all_visible, bg="#2a2a3d", fg=self.c_text, relief=tk.FLAT, padx=7, font=("Segoe UI", 8))
+        btn_sel_vis = tk.Button(filter_bar_top, text="Select Visible", command=self.select_all_visible, bg="#2a2a3d", fg=self.c_text, relief=tk.FLAT, padx=7, font=("Segoe UI", 8))
         btn_sel_vis.pack(side=tk.RIGHT, padx=3)
         
-        btn_sel_cat = tk.Button(filter_bar, text="Select Category", command=self.select_current_category, bg="#4f46e5", fg="#ffffff", relief=tk.FLAT, padx=8, font=("Segoe UI", 8, "bold"))
+        btn_sel_cat = tk.Button(filter_bar_top, text="Select Current View", command=self.select_current_category, bg="#4f46e5", fg="#ffffff", relief=tk.FLAT, padx=8, font=("Segoe UI", 8, "bold"))
         btn_sel_cat.pack(side=tk.RIGHT, padx=3)
         
         # Prominent ⭐ Select ALL Button in Toolbar
-        self.btn_sel_all = tk.Button(filter_bar, text="⭐ Select ALL Files", command=self.select_all_everything, bg="#2563eb", fg="#ffffff", relief=tk.FLAT, padx=12, pady=2, font=("Segoe UI", 9, "bold"), cursor="hand2")
+        self.btn_sel_all = tk.Button(filter_bar_top, text="⭐ Select ALL Files", command=self.select_all_everything, bg="#2563eb", fg="#ffffff", relief=tk.FLAT, padx=12, pady=2, font=("Segoe UI", 9, "bold"), cursor="hand2")
         self.btn_sel_all.pack(side=tk.RIGHT, padx=4)
+
+        # Filter Toolbar (Row 2: Category Filters)
+        filter_bar_bot = tk.Frame(self.view_list_frame, bg=self.c_bg, pady=2)
+        filter_bar_bot.pack(fill=tk.X)
+        
+        tk.Label(filter_bar_bot, text="Category:", fg=self.c_text_dim, bg=self.c_bg, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        categories = ["All", "📁 Folder", "Godot / Game", "3D & Assets", "Code & Dev", "Archives", "Media", "Documents", "Other"]
+        for cat in categories:
+            rb = tk.Radiobutton(filter_bar_bot, text=cat, value=cat, variable=self.category_var, command=self.filter_tree_display,
+                                bg=self.c_bg, fg=self.c_text, selectcolor=self.c_card, activebackground=self.c_bg, activeforeground=self.c_accent, font=("Segoe UI", 8))
+            rb.pack(side=tk.LEFT, padx=2)
 
         # Center: Treeview Table
         table_frame = tk.Frame(self.view_list_frame, bg=self.c_card)
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
         
         columns = ("selected", "name", "category", "size", "cluster", "type")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
         
         self.tree.heading("selected", text="✓", command=self.toggle_all_selection)
-        self.tree.heading("name", text="File Name", command=lambda: self.sort_tree("name", False))
+        self.tree.heading("name", text="File / Folder Name", command=lambda: self.sort_tree("name", False))
         self.tree.heading("category", text="Category", command=lambda: self.sort_tree("category", False))
         self.tree.heading("size", text="Size", command=lambda: self.sort_tree("size", False))
         self.tree.heading("cluster", text="First Cluster", command=lambda: self.sort_tree("cluster", False))
@@ -522,7 +543,7 @@ class ExFatRescueApp:
         tk.Label(map_bar, text="🗺️ Visual Disk Map", font=("Segoe UI", 10, "bold"), fg=self.c_text, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 15))
         
         tk.Label(map_bar, text="Group By:", font=("Segoe UI", 9, "bold"), fg=self.c_text_dim, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 6))
-        for g_opt in ["Category", "Extension (.ext)", "Folder / Project"]:
+        for g_opt in ["Actual Folders", "Category", "Extension (.ext)"]:
             tk.Radiobutton(map_bar, text=g_opt, value=g_opt, variable=self.map_group_var, command=self.render_visual_map,
                            bg="#1a1a27", fg=self.c_text, selectcolor="#2d2d42", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=4)
                            
@@ -546,16 +567,21 @@ class ExFatRescueApp:
         # Map Hover Info Bar
         self.map_status_bar = tk.Frame(self.view_map_frame, bg="#181824", padx=12, pady=5)
         self.map_status_bar.pack(fill=tk.X)
-        self.lbl_map_info = tk.Label(self.map_status_bar, text="Hover over or click a block to inspect size, file count, and category.", fg=self.c_text_dim, bg="#181824", font=("Segoe UI", 9))
+        self.lbl_map_info = tk.Label(self.map_status_bar, text="Hover over or click a block to inspect size, file count, and folder.", fg=self.c_text_dim, bg="#181824", font=("Segoe UI", 9))
         self.lbl_map_info.pack(side=tk.LEFT)
 
-        # ---------------- VIEW 3: FOLDER TREE EXPLORER ----------------
+        # ---------------- VIEW 3: FOLDER EXPLORER ----------------
         self.view_tree_frame = tk.Frame(self.center_container, bg=self.c_card, bd=1, relief=tk.SOLID)
         
         tree_toolbar = tk.Frame(self.view_tree_frame, bg="#1a1a27", padx=12, pady=6)
         tree_toolbar.pack(fill=tk.X)
-        tk.Label(tree_toolbar, text="📁 Hierarchical Folder & Category Tree", font=("Segoe UI", 10, "bold"), fg=self.c_text, bg="#1a1a27").pack(side=tk.LEFT)
+        tk.Label(tree_toolbar, text="📁 Hierarchical Folder Explorer", font=("Segoe UI", 10, "bold"), fg=self.c_text, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 15))
         
+        tk.Label(tree_toolbar, text="View Mode:", font=("Segoe UI", 9, "bold"), fg=self.c_text_dim, bg="#1a1a27").pack(side=tk.LEFT, padx=(0, 6))
+        for m_label, m_val in [("📁 Actual Folders on Disk", "folders"), ("🏷️ Categorized Buckets", "categories")]:
+            tk.Radiobutton(tree_toolbar, text=m_label, value=m_val, variable=self.folder_tree_mode_var, command=self.populate_folder_tree,
+                           bg="#1a1a27", fg=self.c_text, selectcolor="#2d2d42", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=4)
+
         btn_exp_all = tk.Button(tree_toolbar, text="Expand All", command=self.expand_folder_tree, bg="#2d2d42", fg=self.c_text, font=("Segoe UI", 8), relief=tk.FLAT, padx=8)
         btn_exp_all.pack(side=tk.RIGHT, padx=3)
         btn_col_all = tk.Button(tree_toolbar, text="Collapse All", command=self.collapse_folder_tree, bg="#2d2d42", fg=self.c_text, font=("Segoe UI", 8), relief=tk.FLAT, padx=8)
@@ -564,22 +590,20 @@ class ExFatRescueApp:
         folder_table_frame = tk.Frame(self.view_tree_frame, bg=self.c_card)
         folder_table_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
         
-        f_columns = ("selected", "category", "size", "count", "type")
+        f_columns = ("selected", "type_info", "size", "count")
         self.folder_tree = ttk.Treeview(folder_table_frame, columns=f_columns, show="tree headings", selectmode="extended")
         
-        self.folder_tree.heading("#0", text="Folder / Category Hierarchy")
+        self.folder_tree.heading("#0", text="Folder / Item Hierarchy")
         self.folder_tree.heading("selected", text="✓")
-        self.folder_tree.heading("category", text="Category")
+        self.folder_tree.heading("type_info", text="Type")
         self.folder_tree.heading("size", text="Total Size")
         self.folder_tree.heading("count", text="File Count")
-        self.folder_tree.heading("type", text="Type")
         
-        self.folder_tree.column("#0", width=460, anchor="w")
+        self.folder_tree.column("#0", width=520, anchor="w")
         self.folder_tree.column("selected", width=40, anchor="center")
-        self.folder_tree.column("category", width=140, anchor="center")
-        self.folder_tree.column("size", width=120, anchor="e")
-        self.folder_tree.column("count", width=110, anchor="center")
-        self.folder_tree.column("type", width=100, anchor="center")
+        self.folder_tree.column("type_info", width=140, anchor="center")
+        self.folder_tree.column("size", width=130, anchor="e")
+        self.folder_tree.column("count", width=120, anchor="center")
         
         f_scroll = ttk.Scrollbar(folder_table_frame, orient=tk.VERTICAL, command=self.folder_tree.yview)
         self.folder_tree.configure(yscrollcommand=f_scroll.set)
@@ -636,6 +660,45 @@ class ExFatRescueApp:
         self.btn_recover_all.pack(side=tk.RIGHT, padx=(0, 12))
 
     # ==========================================================================
+    # Folder Resolution Engine (Actual Folders vs Categorized)
+    # ==========================================================================
+
+    def refresh_folder_cache(self):
+        """ Rebuilds index of actual directory entries discovered on disk """
+        dirs = [i for i in self.discovered_items if i.get('is_dir')]
+        self.cached_dir_names = set(d['name'] for d in dirs)
+        self.sorted_dir_items = sorted(dirs, key=lambda x: x['first_cluster'])
+
+    def resolve_actual_folder(self, item):
+        """ Resolves which actual folder a file belongs to based on disk structures """
+        if item.get('is_dir'):
+            return item['name']
+            
+        name = item['name']
+        # 1. Explicit path in record
+        if '/' in name or '\\' in name:
+            parts = [p for p in name.replace('\\', '/').split('/') if p]
+            if len(parts) > 1:
+                return parts[0]
+                
+        # 2. Known subfolder keyword match
+        name_lower = name.lower()
+        for d_name in self.cached_dir_names:
+            if d_name.lower() in name_lower and len(d_name) > 3:
+                return d_name
+                
+        # 3. Cluster proximity (exFAT directory table clustering)
+        if self.sorted_dir_items:
+            c = item['first_cluster']
+            idx = bisect.bisect_right([d['first_cluster'] for d in self.sorted_dir_items], c) - 1
+            if 0 <= idx < len(self.sorted_dir_items):
+                cand = self.sorted_dir_items[idx]
+                if c - cand['first_cluster'] < 1500:
+                    return cand['name']
+                    
+        return "[Root / Loose Files]"
+
+    # ==========================================================================
     # View Switching (Table / Visual Map / Folder Tree)
     # ==========================================================================
 
@@ -685,6 +748,7 @@ class ExFatRescueApp:
             )
             return
 
+        self.refresh_folder_cache()
         group_mode = self.map_group_var.get()
         group_data = {}
 
@@ -694,23 +758,18 @@ class ExFatRescueApp:
             sz = max(item['data_len'], 1)
             cat = item.get('category', 'Other')
             
-            if group_mode == "Category":
+            if group_mode == "Actual Folders":
+                key = self.resolve_actual_folder(item)
+            elif group_mode == "Category":
                 key = cat
-            elif group_mode == "Extension (.ext)":
+            else: # Extension (.ext)
                 ext = os.path.splitext(item['name'])[1].lower()
                 key = ext if ext else "No Extension"
-            else: # Folder / Project
-                name = item['name'].replace('\\', '/')
-                parts = [p for p in name.split('/') if p]
-                if len(parts) > 1:
-                    key = parts[0]
-                else:
-                    key = f"Root ({cat})"
                     
             if key not in group_data:
                 group_data[key] = {
                     'name': key,
-                    'category': cat,
+                    'category': cat if group_mode != "Actual Folders" else "📁 Folder",
                     'size': 0,
                     'count': 0,
                     'indices': [],
@@ -797,10 +856,10 @@ class ExFatRescueApp:
                 total_bytes = sum(t['size'] for t in self.rendered_tiles)
                 pct = (hovered['size'] / max(total_bytes, 1)) * 100
                 self.lbl_map_info.config(
-                    text=f"📦 {hovered['name']} — Size: {format_size(hovered['size'])} ({pct:.1f}% of data) | Files: {hovered['count']:,} | Category: {hovered.get('category')} [Double-click to view in table]"
+                    text=f"📁 {hovered['name']} — Size: {format_size(hovered['size'])} ({pct:.1f}% of data) | Files: {hovered['count']:,} | Type: {hovered.get('category')} [Double-click to view in table]"
                 )
             else:
-                self.lbl_map_info.config(text="Hover over or click a block to inspect size, file count, and category.")
+                self.lbl_map_info.config(text="Hover over or click a block to inspect size, file count, and folder.")
 
     def on_map_click(self, event):
         x, y = event.x, event.y
@@ -828,6 +887,7 @@ class ExFatRescueApp:
         name = self.active_tile_data['name']
         
         self.switch_view("list")
+        self.item_type_filter_var.set("all")
         if group_mode == "Category":
             if name in ["Godot / Game", "3D & Assets", "Code & Dev", "Archives", "Media", "Documents"]:
                 self.category_var.set(name)
@@ -837,9 +897,12 @@ class ExFatRescueApp:
         elif group_mode == "Extension (.ext)":
             self.category_var.set("All")
             self.search_var.set(name)
-        else: # Folder
+        else: # Actual Folders
             self.category_var.set("All")
-            self.search_var.set(name)
+            if name != "[Root / Loose Files]":
+                self.search_var.set(name)
+            else:
+                self.search_var.set("")
         self.filter_tree_display()
 
     def select_active_map_group(self):
@@ -867,7 +930,7 @@ class ExFatRescueApp:
         messagebox.showinfo("Selected", f"Selected {len(indices):,} files in '{self.active_tile_data['name']}' ({format_size(self.active_tile_data['size'])})!")
 
     # ==========================================================================
-    # Hierarchical Folder Tree Implementation
+    # Hierarchical Folder Tree Implementation (Actual Folders vs Categories)
     # ==========================================================================
 
     def populate_folder_tree(self):
@@ -875,37 +938,80 @@ class ExFatRescueApp:
         if not self.discovered_items:
             return
 
-        cat_groups = {}
-        for idx, item in enumerate(self.discovered_items):
-            cat = item.get('category', 'Other')
-            if cat not in cat_groups:
-                cat_groups[cat] = {'size': 0, 'count': 0, 'indices': []}
-            cat_groups[cat]['size'] += item['data_len']
-            cat_groups[cat]['count'] += 1
-            cat_groups[cat]['indices'].append(idx)
+        self.refresh_folder_cache()
+        mode = self.folder_tree_mode_var.get()
+        
+        if mode == "folders":
+            # Mode A: ACTUAL DISCOVERED FOLDERS
+            folder_groups = {}
+            for idx, item in enumerate(self.discovered_items):
+                if item['is_dir']:
+                    continue
+                fld = self.resolve_actual_folder(item)
+                if fld not in folder_groups:
+                    folder_groups[fld] = {'size': 0, 'count': 0, 'indices': []}
+                folder_groups[fld]['size'] += item['data_len']
+                folder_groups[fld]['count'] += 1
+                folder_groups[fld]['indices'].append(idx)
 
-        for cat, data in sorted(cat_groups.items(), key=lambda x: x[1]['size'], reverse=True):
-            node_id = f"cat_{cat}"
-            checked = "[✓]" if all(i in self.selected_item_indices for i in data['indices']) else "[ ]"
-            self.folder_tree.insert(
-                "", tk.END, iid=node_id, text=f"📁 {cat}",
-                values=(checked, cat, format_size(data['size']), f"{data['count']:,}", "Category Root")
-            )
-            # Add top sample items under category
-            for i in data['indices'][:30]:
-                it = self.discovered_items[i]
-                item_node = f"item_{i}"
-                i_checked = "[✓]" if i in self.selected_item_indices else "[ ]"
-                i_size = "-" if it['is_dir'] else format_size(it['data_len'])
+            # Insert known empty folders as well
+            for d in self.sorted_dir_items:
+                if d['name'] not in folder_groups:
+                    folder_groups[d['name']] = {'size': 0, 'count': 0, 'indices': []}
+
+            for fld, data in sorted(folder_groups.items(), key=lambda x: x[1]['size'], reverse=True):
+                node_id = f"fld_{fld}"
+                checked = "[✓]" if (data['indices'] and all(i in self.selected_item_indices for i in data['indices'])) else "[ ]"
                 self.folder_tree.insert(
-                    node_id, tk.END, iid=item_node, text=it['name'],
-                    values=(i_checked, cat, i_size, "1", "Folder" if it['is_dir'] else "File")
+                    "", tk.END, iid=node_id, text=f"📁 {fld}",
+                    values=(checked, "Actual Folder", format_size(data['size']), f"{data['count']:,}")
                 )
-            if len(data['indices']) > 30:
+                for i in data['indices'][:35]:
+                    it = self.discovered_items[i]
+                    item_node = f"item_{i}"
+                    i_checked = "[✓]" if i in self.selected_item_indices else "[ ]"
+                    i_size = "-" if it['is_dir'] else format_size(it['data_len'])
+                    self.folder_tree.insert(
+                        node_id, tk.END, iid=item_node, text=it['name'],
+                        values=(i_checked, it.get('category', 'File'), i_size, "1")
+                    )
+                if len(data['indices']) > 35:
+                    self.folder_tree.insert(
+                        node_id, tk.END, iid=f"more_{fld}", text=f"... and {len(data['indices']) - 35:,} more files ...",
+                        values=("-", "-", "-", "-")
+                    )
+        else:
+            # Mode B: CATEGORIZED BUCKETS
+            cat_groups = {}
+            for idx, item in enumerate(self.discovered_items):
+                cat = item.get('category', 'Other')
+                if cat not in cat_groups:
+                    cat_groups[cat] = {'size': 0, 'count': 0, 'indices': []}
+                cat_groups[cat]['size'] += item['data_len']
+                cat_groups[cat]['count'] += 1
+                cat_groups[cat]['indices'].append(idx)
+
+            for cat, data in sorted(cat_groups.items(), key=lambda x: x[1]['size'], reverse=True):
+                node_id = f"cat_{cat}"
+                checked = "[✓]" if all(i in self.selected_item_indices for i in data['indices']) else "[ ]"
                 self.folder_tree.insert(
-                    node_id, tk.END, iid=f"more_{cat}", text=f"... and {len(data['indices']) - 30} more files ...",
-                    values=("-", cat, "-", "-", "-")
+                    "", tk.END, iid=node_id, text=f"🏷️ {cat}",
+                    values=(checked, "Category Bucket", format_size(data['size']), f"{data['count']:,}")
                 )
+                for i in data['indices'][:30]:
+                    it = self.discovered_items[i]
+                    item_node = f"item_{i}"
+                    i_checked = "[✓]" if i in self.selected_item_indices else "[ ]"
+                    i_size = "-" if it['is_dir'] else format_size(it['data_len'])
+                    self.folder_tree.insert(
+                        node_id, tk.END, iid=item_node, text=it['name'],
+                        values=(i_checked, cat, i_size, "1")
+                    )
+                if len(data['indices']) > 30:
+                    self.folder_tree.insert(
+                        node_id, tk.END, iid=f"more_{cat}", text=f"... and {len(data['indices']) - 30:,} more files ...",
+                        values=("-", "-", "-", "-")
+                    )
 
     def on_folder_tree_click(self, event):
         region = self.folder_tree.identify_region(event.x, event.y)
@@ -913,7 +1019,11 @@ class ExFatRescueApp:
             item_id = self.folder_tree.identify_row(event.y)
             if not item_id:
                 return
-            if item_id.startswith("cat_"):
+            if item_id.startswith("fld_"):
+                fld_name = item_id.replace("fld_", "")
+                self.select_folder_group(fld_name)
+                self.populate_folder_tree()
+            elif item_id.startswith("cat_"):
                 cat = item_id.replace("cat_", "")
                 self.category_var.set(cat)
                 self.select_current_category()
@@ -922,6 +1032,31 @@ class ExFatRescueApp:
                 idx = int(item_id.replace("item_", ""))
                 self.toggle_item_selection(str(idx))
                 self.populate_folder_tree()
+
+    def select_folder_group(self, fld_name):
+        drive_path = self.target_drive_var.get().strip()
+        max_size = get_physical_drive_size(drive_path)
+        max_clusters = max_size // CLUSTER_SIZE
+        
+        self.refresh_folder_cache()
+        indices = [idx for idx, it in enumerate(self.discovered_items)
+                   if not it['is_dir'] and self.resolve_actual_folder(it) == fld_name]
+        
+        all_selected = all(i in self.selected_item_indices for i in indices) if indices else False
+        for idx in indices:
+            it = self.discovered_items[idx]
+            if 0 < it['data_len'] <= max_size and 2 <= it['first_cluster'] < max_clusters:
+                if all_selected:
+                    if idx in self.selected_item_indices:
+                        self.selected_item_indices.remove(idx)
+                        self.selected_count -= 1
+                        self.selected_bytes -= it['data_len']
+                else:
+                    if idx not in self.selected_item_indices:
+                        self.selected_item_indices.add(idx)
+                        self.selected_count += 1
+                        self.selected_bytes += it['data_len']
+        self.update_selection_summary_fast()
 
     def expand_folder_tree(self):
         for item in self.folder_tree.get_children():
@@ -951,7 +1086,7 @@ class ExFatRescueApp:
                     self.resume_offset = data.get("current_offset")
                     if items_count > 0:
                         self.btn_resume.config(state=tk.NORMAL)
-                        self.lbl_scan_info.config(text=f"⚡ Checkpoint ready: {items_count} files at {last_gb:.1f} GB. Click 'Resume Last Scan' to continue!")
+                        self.lbl_scan_info.config(text=f"⚡ Checkpoint ready: {items_count:,} files/folders at {last_gb:.1f} GB. Click 'Resume Last Scan' to continue!")
             except Exception:
                 pass
 
@@ -1103,23 +1238,30 @@ class ExFatRescueApp:
         messagebox.showinfo("Selected", f"Selected ALL {self.selected_count:,} files ({format_size(self.selected_bytes)} total) across the entire drive!")
 
     def select_current_category(self):
-        """ Selects all files belonging to the active category """
-        cat_filter = self.category_var.get()
-        if cat_filter == "All":
-            self.select_all_everything()
-            return
-            
+        """ Selects all files belonging to the active view/filter """
         drive_path = self.target_drive_var.get().strip()
         max_size = get_physical_drive_size(drive_path)
         max_clusters = max_size // CLUSTER_SIZE
         
+        cat_filter = self.category_var.get()
+        type_filter = self.item_type_filter_var.get()
+        query = self.search_var.get().lower().strip()
+        
         for idx, item in enumerate(self.discovered_items):
-            if item.get('category') == cat_filter and not item['is_dir']:
-                if idx not in self.selected_item_indices:
-                    if 0 < item['data_len'] <= max_size and 2 <= item['first_cluster'] < max_clusters:
-                        self.selected_item_indices.add(idx)
-                        self.selected_count += 1
-                        self.selected_bytes += item['data_len']
+            if item['is_dir']:
+                continue
+            if type_filter == "folders_only":
+                continue
+            if cat_filter != "All" and item.get('category') != cat_filter:
+                continue
+            if query and query not in item['name'].lower():
+                continue
+                
+            if idx not in self.selected_item_indices:
+                if 0 < item['data_len'] <= max_size and 2 <= item['first_cluster'] < max_clusters:
+                    self.selected_item_indices.add(idx)
+                    self.selected_count += 1
+                    self.selected_bytes += item['data_len']
                         
         for item_id in self.tree.get_children():
             if item_id != "overflow_notice":
@@ -1174,24 +1316,38 @@ class ExFatRescueApp:
     def filter_tree_display(self, *args):
         query = self.search_var.get().lower().strip()
         cat_filter = self.category_var.get()
+        type_filter = self.item_type_filter_var.get()
         
         self.tree.delete(*self.tree.get_children())
         
         displayed = 0
         for idx, item in enumerate(self.discovered_items):
-            if cat_filter != "All" and item.get('category') != cat_filter:
+            # Type filter: all, folders_only, files_only
+            if type_filter == "folders_only" and not item['is_dir']:
                 continue
+            if type_filter == "files_only" and item['is_dir']:
+                continue
+                
+            # Category filter
+            if cat_filter != "All":
+                if cat_filter == "📁 Folder" and not item['is_dir']:
+                    continue
+                if cat_filter != "📁 Folder" and item.get('category') != cat_filter:
+                    continue
+                    
+            # Search filter
             if query and query not in item['name'].lower():
                 continue
                 
             checked = "[✓]" if idx in self.selected_item_indices else "[ ]"
             type_str = "Folder" if item['is_dir'] else "File"
             size_str = "-" if item['is_dir'] else format_size(item['data_len'])
+            cat_display = "📁 Folder" if item['is_dir'] else item.get('category', 'Other')
             
             self.tree.insert("", tk.END, iid=str(idx), values=(
                 checked,
                 item['name'],
-                item.get('category', 'Other'),
+                cat_display,
                 size_str,
                 f"Cluster {item['first_cluster']}",
                 type_str
@@ -1199,7 +1355,7 @@ class ExFatRescueApp:
             displayed += 1
             if displayed >= 2500:
                 self.tree.insert("", tk.END, iid="overflow_notice", values=(
-                    "-", f"... and {len(self.discovered_items) - 2500:,} more items (Use Search/Category to filter) ...",
+                    "-", f"... and {len(self.discovered_items) - 2500:,} more items (Use Search/Filters to narrow) ...",
                     "", "", "", ""
                 ))
                 break
@@ -1263,6 +1419,7 @@ class ExFatRescueApp:
         self.selected_bytes = 0
         
         for idx, item in enumerate(self.discovered_items):
+            # Auto-select game projects, developer repos, and assets
             if item.get('category') in ['Godot / Game', 'Code & Dev', '3D & Assets']:
                 if 0 < item['data_len'] <= max_size and 2 <= item['first_cluster'] < max_clusters:
                     self.selected_item_indices.add(idx)
@@ -1270,6 +1427,7 @@ class ExFatRescueApp:
                         self.selected_count += 1
                         self.selected_bytes += item['data_len']
                     
+        self.refresh_folder_cache()
         self.filter_tree_display()
         self.update_selection_summary_fast()
         
@@ -1358,7 +1516,7 @@ class ExFatRescueApp:
                             key = (entry['name'], entry['first_cluster'], entry['data_len'])
                             if key not in seen_keys:
                                 seen_keys.add(key)
-                                entry['category'] = get_file_category(entry['name'])
+                                entry['category'] = get_file_category(entry['name'], entry['is_dir'])
                                 batch_items.append(entry)
                                 worker_items.append(entry)
                     idx += 1
@@ -1396,11 +1554,11 @@ class ExFatRescueApp:
                 self.msg_queue.put(("scan_done", current))
 
     # ==========================================================================
-    # Recovery Execution (Selected vs ALL Files)
+    # Recovery Execution (Preserves Discovered Folder Structure)
     # ==========================================================================
 
     def start_recovery(self):
-        """ Recovers currently selected files """
+        """ Recovers currently selected files into their actual folder directories """
         if not self.selected_item_indices:
             messagebox.showinfo("Select Files", "Please select at least one file to recover, or click 'Recover ALL Files'.")
             return
@@ -1424,7 +1582,7 @@ class ExFatRescueApp:
         threading.Thread(target=self.recovery_worker, args=(drive_path, dest_dir, indices), daemon=True).start()
 
     def start_recovery_all(self):
-        """ 1-Click Recovery for ALL files across the entire drive """
+        """ 1-Click Recovery for ALL files across the entire drive into actual folders """
         if self.is_scanning or self.is_recovering:
             return
             
@@ -1459,6 +1617,7 @@ class ExFatRescueApp:
             f"• Total Size: {format_size(total_bytes)}\n"
             f"• Target Device: {drive_path}\n"
             f"• Destination: {dest_dir}\n\n"
+            f"Files will be organized into their discovered actual folders.\n"
             f"Proceed with full batch recovery?"
         )
         if not confirm:
@@ -1484,6 +1643,8 @@ class ExFatRescueApp:
         max_drive_size = get_physical_drive_size(drive_path)
         max_clusters = max_drive_size // CLUSTER_SIZE
         
+        self.refresh_folder_cache()
+        
         try:
             drive = open(drive_path, "rb")
         except Exception as e:
@@ -1507,14 +1668,21 @@ class ExFatRescueApp:
                 if item['data_len'] <= 0 or item['data_len'] > max_drive_size or item['first_cluster'] < 2 or item['first_cluster'] >= max_clusters:
                     continue
                     
-                rel_path = sanitize_rel_path(item['name'])
+                folder_name = self.resolve_actual_folder(item)
+                clean_name = sanitize_filename(item['name'])
                 offset = CLUSTER_HEAP_OFFSET + (item['first_cluster'] - 2) * CLUSTER_SIZE
                 
                 if offset + item['data_len'] > max_drive_size:
                     continue
                 
-                out_path = os.path.join(dest_dir, rel_path)
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                # Organize files into actual folders on disk
+                if folder_name and folder_name != "[Root / Loose Files]":
+                    target_folder = os.path.join(dest_dir, sanitize_filename(folder_name))
+                else:
+                    target_folder = dest_dir
+                    
+                os.makedirs(target_folder, exist_ok=True)
+                out_path = os.path.join(target_folder, clean_name)
                 
                 # Collision handling
                 if os.path.exists(out_path):
@@ -1561,6 +1729,7 @@ class ExFatRescueApp:
                 
                 if msg_type == "items_batch":
                     cat_filter = self.category_var.get()
+                    type_filter = self.item_type_filter_var.get()
                     query = self.search_var.get().lower().strip()
                     drive_path = self.target_drive_var.get().strip()
                     max_size = get_physical_drive_size(drive_path)
@@ -1578,13 +1747,27 @@ class ExFatRescueApp:
                                     self.selected_bytes += item['data_len']
                                 
                         if len(self.tree.get_children()) < 2000:
-                            if (cat_filter == "All" or item.get('category') == cat_filter) and (not query or query in item['name'].lower()):
-                                checked = "[✓]" if idx in self.selected_item_indices else "[ ]"
-                                type_str = "Folder" if item['is_dir'] else "File"
-                                size_str = "-" if item['is_dir'] else format_size(item['data_len'])
-                                self.tree.insert("", tk.END, iid=str(idx), values=(
-                                    checked, item['name'], item.get('category', 'Other'), size_str, f"Cluster {item['first_cluster']}", type_str
-                                ))
+                            # Apply filters
+                            if type_filter == "folders_only" and not item['is_dir']:
+                                continue
+                            if type_filter == "files_only" and item['is_dir']:
+                                continue
+                            if cat_filter != "All":
+                                if cat_filter == "📁 Folder" and not item['is_dir']:
+                                    continue
+                                if cat_filter != "📁 Folder" and item.get('category') != cat_filter:
+                                    continue
+                            if query and query not in item['name'].lower():
+                                continue
+                                
+                            checked = "[✓]" if idx in self.selected_item_indices else "[ ]"
+                            type_str = "Folder" if item['is_dir'] else "File"
+                            size_str = "-" if item['is_dir'] else format_size(item['data_len'])
+                            cat_display = "📁 Folder" if item['is_dir'] else item.get('category', 'Other')
+                            
+                            self.tree.insert("", tk.END, iid=str(idx), values=(
+                                checked, item['name'], cat_display, size_str, f"Cluster {item['first_cluster']}", type_str
+                            ))
                     self.update_selection_summary_fast()
                     
                 elif msg_type == "scan_progress":
@@ -1601,11 +1784,14 @@ class ExFatRescueApp:
                     self.btn_recover_selected.config(state=tk.NORMAL)
                     self.btn_recover_all.config(state=tk.NORMAL)
                     self.btn_resume.config(state=tk.NORMAL)
+                    
+                    self.refresh_folder_cache()
+                    
                     if msg_type == "scan_done":
                         self.progress_bar['value'] = 100
-                        self.lbl_footer_status.config(text=f"Scan complete! Discovered {len(self.discovered_items):,} files. Click '📦 Recover ALL Files' or choose categories, then 'Recover'.")
+                        self.lbl_footer_status.config(text=f"Scan complete! Discovered {len(self.discovered_items):,} items ({len(self.cached_dir_names)} actual folders). Click '📦 Recover ALL Files' or inspect folders.")
                     else:
-                        self.lbl_footer_status.config(text=f"Scan paused/stopped. Checkpoint saved with {len(self.discovered_items):,} files. Click 'Resume' anytime or 'Recover' now.")
+                        self.lbl_footer_status.config(text=f"Scan paused/stopped. Checkpoint saved with {len(self.discovered_items):,} items. Click 'Resume' anytime or 'Recover' now.")
                     
                     if self.active_view == "map":
                         self.render_visual_map()
@@ -1626,8 +1812,8 @@ class ExFatRescueApp:
                     self.btn_recover_selected.config(state=tk.NORMAL)
                     self.btn_recover_all.config(state=tk.NORMAL)
                     self.progress_bar['value'] = 100
-                    self.lbl_footer_status.config(text=f"Recovery finished! Saved {data:,} files to destination.")
-                    messagebox.showinfo("Success", f"Recovery complete!\n\nSuccessfully recovered {data:,} files to:\n{self.output_dir_var.get()}")
+                    self.lbl_footer_status.config(text=f"Recovery finished! Saved {data:,} files into actual folders.")
+                    messagebox.showinfo("Success", f"Recovery complete!\n\nSuccessfully recovered {data:,} files organized into their actual folders to:\n{self.output_dir_var.get()}")
                     
                 elif msg_type == "error":
                     self.lbl_footer_status.config(text=f"Notice: {data}")
