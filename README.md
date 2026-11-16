@@ -14,10 +14,14 @@ Unlike traditional raw carvers (like PhotoRec) which destroy folder structures a
 
 ## ✨ Features
 
-- 🖥️ **Modern Dark-Themed GUI:** Clean Tkinter dark interface with real-time progress indicators.
-- 💾 **Auto-Save Checkpoints & Instant Resume:** Automatically writes atomic progress checkpoints (`exfat_rescue_checkpoint.json`). Never lose scan progress if interrupted or stopped.
-- 🛑 **Responsive Controls:** True non-blocking background scanner with responsive Stop button.
-- 🎯 **1-Click Select ALL & Batch Recovery:** Select every single discovered file with one button (`⭐ Select ALL Files`) and extract all projects effortlessly.
+- 🖥️ **Modern Dark-Themed GUI:** Clean Tkinter dark interface with real-time speed, progress, and file counters.
+- 🗺️ **Interactive SpaceSniffer Visual Disk Map:** Proportional squarified treemap visualizer showing data distribution across categories, extensions, or projects with live hover inspection and 1-click group extraction.
+- 📁 **Hierarchical Folder Explorer:** Tree-based directory browser with folder size rollups and branch checkboxes.
+- 📦 **Dual 1-Click Recovery Modes:**
+  - `📦 Recover ALL Files (Entire Drive)`: Dump all indexed files (~135+ GB) in 1 click without needing manual selection.
+  - `🚀 Recover Selected Files`: Precision recovery for selected files or specific categories.
+- 💾 **Auto-Save Checkpoints & Instant Resume:** Continuously writes atomic progress checkpoints (`exfat_rescue_checkpoint.json`). Never lose scan progress on large flash cards.
+- 🛑 **Responsive Instant Stop:** Background scanner halts immediately without UI hangs.
 - 🔍 **Instant Search & Category Filters:** Quickly isolate Godot projects, 3D models, code files, or archives.
 - 📏 **Hardware-Accurate Media Sizing:** Uses Windows IOCTLs to detect physical sector geometry, preventing EOF errors and over-reads near the end of flash storage.
 - ⚡ **Zero External Dependencies:** Built using Python's standard library.
