@@ -14,9 +14,12 @@ Unlike traditional raw carvers (like PhotoRec) which destroy folder structures a
 
 ## ✨ Features
 
-- 🖥️ **Modern Dark-Themed GUI:** Built with Python/Tkinter with zero bloat.
-- 🎯 **Pre-Recovery Inspection & Selection:** Preview discovered files and folders before extracting. Choose what you want, leave what you don't.
+- 🖥️ **Modern Dark-Themed GUI:** Clean Tkinter dark interface with real-time progress indicators.
+- 💾 **Auto-Save Checkpoints & Instant Resume:** Automatically writes atomic progress checkpoints (`exfat_rescue_checkpoint.json`). Never lose scan progress if interrupted or stopped.
+- 🛑 **Responsive Controls:** True non-blocking background scanner with responsive Stop button.
+- 🎯 **1-Click Select ALL & Batch Recovery:** Select every single discovered file with one button (`⭐ Select ALL Files`) and extract all projects effortlessly.
 - 🔍 **Instant Search & Category Filters:** Quickly isolate Godot projects, 3D models, code files, or archives.
+- 📏 **Hardware-Accurate Media Sizing:** Uses Windows IOCTLs to detect physical sector geometry, preventing EOF errors and over-reads near the end of flash storage.
 - ⚡ **Zero External Dependencies:** Built using Python's standard library.
 - 🚀 **Standalone Executable:** Ready to run with embedded Windows UAC administrator elevation.
 

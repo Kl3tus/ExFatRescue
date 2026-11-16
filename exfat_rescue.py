@@ -7,6 +7,8 @@ import json
 import threading
 import queue
 import webbrowser
+import ctypes
+import ctypes.wintypes
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -17,20 +19,14 @@ except ImportError:
     HAS_PIL = False
 
 # ==============================================================================
-# ExFatRescue v1.0.2 - High-Performance exFAT Recovery
-# One-Click "Select All (Entire Drive)", Auto-Save & Resume
+# ExFatRescue v1.1.0 - Production-Grade exFAT Raw File & Project Recovery Tool
+# Special support for Godot projects, source code, 3D assets, and media
 # Author: Mikel Bryan (Kl3tus)
 # ==============================================================================
 
-MAX_DISK_BYTES = 512 * 1024 * 1024 * 1024
-CLUSTER_SIZE = 128 * 1024
-MAX_CLUSTER = MAX_DISK_BYTES // CLUSTER_SIZE
-
-def get_resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath(os.path.dirname(__file__)), relative_path)
+FALLBACK_DISK_BYTES = 511868665856  # Exact size of 512GB SDXC (Generic MassStorageClass)
+CLUSTER_SIZE = 128 * 1024          # 128 KB
+CLUSTER_HEAP_OFFSET = 32 * 1024 * 1024 # 32 MB standard exFAT cluster heap start
 
 CATEGORY_MAP = {
     'Godot / Game': ['.godot', '.gd', '.tscn', '.tres', '.import', '.gdextension', '.shader'],
@@ -40,6 +36,59 @@ CATEGORY_MAP = {
     'Media': ['.png', '.jpg', '.jpeg', '.webp', '.svg', '.gif', '.bmp', '.mp4', '.mkv', '.avi', '.mov', '.mp3', '.wav', '.ogg', '.flac'],
     'Documents': ['.pdf', '.txt', '.md', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.rtf']
 }
+
+def get_resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath(os.path.dirname(__file__)), relative_path)
+
+def get_physical_drive_size(drive_path):
+    """ Queries the exact physical size of the drive in bytes via Windows IOCTL """
+    IOCTL_DISK_GET_LENGTH_INFO = 0x00074059
+    GENERIC_READ = 0x80000000
+    FILE_SHARE_READ = 1
+    FILE_SHARE_WRITE = 2
+    OPEN_EXISTING = 3
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateFileW(
+        drive_path,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None,
+        OPEN_EXISTING,
+        0,
+        None
+    )
+    if handle != -1 and handle != 0xFFFFFFFFFFFFFFFF:
+        class GET_LENGTH_INFORMATION(ctypes.Structure):
+            _fields_ = [('Length', ctypes.c_int64)]
+        length_info = GET_LENGTH_INFORMATION()
+        bytes_returned = ctypes.wintypes.DWORD()
+        res = kernel32.DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_LENGTH_INFO,
+            None, 0,
+            ctypes.byref(length_info), ctypes.sizeof(length_info),
+            ctypes.byref(bytes_returned),
+            None
+        )
+        kernel32.CloseHandle(handle)
+        if res and length_info.Length > 0:
+            return length_info.Length
+            
+    # Secondary fallback via file seek
+    try:
+        with open(drive_path, "rb") as f:
+            f.seek(0, 2)
+            sz = f.tell()
+            if sz > 0:
+                return sz
+    except Exception:
+        pass
+        
+    return FALLBACK_DISK_BYTES
 
 def format_size(bytes_val):
     if bytes_val < 1024:
@@ -62,9 +111,10 @@ def sanitize_filename(name):
     clean = re.sub(r'[\x00\\/*?:"<>|]', '_', name).strip()
     return clean if clean else "unnamed_file"
 
-def parse_exfat_entry_set(buf, offset):
+def parse_exfat_entry_set(buf, offset, max_disk_size):
     """
     Parses an exFAT directory entry set (0x85 File + 0xC0 Stream + 0xC1 Name)
+    with strict validation against drive bounds.
     """
     if offset + 32 > len(buf):
         return None
@@ -92,9 +142,10 @@ def parse_exfat_entry_set(buf, offset):
     first_cluster = struct.unpack('<I', buf[stream_off+20:stream_off+24])[0]
     data_len = struct.unpack('<Q', buf[stream_off+24:stream_off+32])[0]
     
-    if first_cluster < 2 or first_cluster >= MAX_CLUSTER:
+    max_clusters = max_disk_size // CLUSTER_SIZE
+    if first_cluster < 2 or first_cluster >= max_clusters:
         return None
-    if not is_dir and data_len > MAX_DISK_BYTES:
+    if not is_dir and data_len > max_disk_size:
         return None
     
     # 0xC1 File Name entries
@@ -128,7 +179,7 @@ def parse_exfat_entry_set(buf, offset):
 class ExFatRescueApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("ExFatRescue - exFAT Lost File & Project Recovery")
+        self.root.title("ExFatRescue v1.1.0 - exFAT Lost File & Project Recovery")
         self.root.geometry("1160x760")
         self.root.minsize(940, 640)
         
@@ -147,10 +198,10 @@ class ExFatRescueApp:
         self.root.configure(bg=self.c_bg)
         
         # State variables
-        self.discovered_items = []  # list of dicts
+        self.discovered_items = []  # Thread-safe UI list
         self.selected_item_indices = set()
-        self.selected_count = 0     # O(1) tracking
-        self.selected_bytes = 0     # O(1) tracking
+        self.selected_count = 0
+        self.selected_bytes = 0
         
         self.is_scanning = False
         self.is_recovering = False
@@ -206,10 +257,10 @@ class ExFatRescueApp:
         header = tk.Frame(self.root, bg=self.c_bg, padx=20, pady=12)
         header.pack(fill=tk.X)
         
-        lbl_title = tk.Label(header, text="🛡️ ExFatRescue", font=("Segoe UI", 18, "bold"), fg=self.c_text, bg=self.c_bg)
+        lbl_title = tk.Label(header, text="🛡️ ExFatRescue v1.1.0", font=("Segoe UI", 18, "bold"), fg=self.c_text, bg=self.c_bg)
         lbl_title.pack(side=tk.LEFT)
         
-        lbl_sub = tk.Label(header, text="  Raw exFAT Project & File Recovery", font=("Segoe UI", 11), fg=self.c_text_dim, bg=self.c_bg)
+        lbl_sub = tk.Label(header, text="  Raw exFAT Project & File Recovery Engine", font=("Segoe UI", 11), fg=self.c_text_dim, bg=self.c_bg)
         lbl_sub.pack(side=tk.LEFT, pady=4)
         
         btn_donate = tk.Button(header, text="💖 Donate / Sponsor", command=self.show_donation_dialog, bg=self.c_donate, fg="#ffffff", font=("Segoe UI", 9, "bold"), relief=tk.FLAT, padx=12, pady=4, cursor="hand2")
@@ -250,7 +301,7 @@ class ExFatRescueApp:
         self.btn_resume = tk.Button(r2, text="⚡ Resume Last Scan", command=self.resume_scan, bg="#059669", fg="#ffffff", font=("Segoe UI", 10, "bold"), relief=tk.FLAT, padx=14, pady=5, state=tk.DISABLED)
         self.btn_resume.pack(side=tk.LEFT)
         
-        self.lbl_scan_info = tk.Label(r2, text="Auto-saving enabled: progress is saved continuously to checkpoint.", fg=self.c_text_dim, bg=self.c_card, font=("Segoe UI", 9))
+        self.lbl_scan_info = tk.Label(r2, text="Auto-saving enabled: scanning progress is backed up continuously to checkpoint.", fg=self.c_text_dim, bg=self.c_card, font=("Segoe UI", 9))
         self.lbl_scan_info.pack(side=tk.LEFT, padx=15)
         
         # Filter & Search Toolbar
@@ -270,7 +321,7 @@ class ExFatRescueApp:
         ent_search = tk.Entry(filter_bar, textvariable=self.search_var, bg=self.c_card, fg=self.c_text, insertbackground=self.c_text, relief=tk.FLAT, width=16, font=("Segoe UI", 9))
         ent_search.pack(side=tk.LEFT)
         
-        # Selection Controls: SELECT ALL (ENTIRE DRIVE)
+        # Selection Controls
         btn_desel = tk.Button(filter_bar, text="Deselect All", command=self.deselect_all, bg="#2a2a3d", fg=self.c_text, relief=tk.FLAT, padx=8, font=("Segoe UI", 8))
         btn_desel.pack(side=tk.RIGHT)
         
@@ -336,7 +387,7 @@ class ExFatRescueApp:
         self.btn_recover.pack(side=tk.RIGHT)
 
     # ==========================================================================
-    # Checkpoint Persistence
+    # Checkpoint Persistence (Crash Protection & Recovery)
     # ==========================================================================
 
     def get_checkpoint_path(self):
@@ -353,21 +404,28 @@ class ExFatRescueApp:
                     items_count = len(data.get("items", []))
                     last_gb = data.get("current_offset", 0) / (1024**3)
                     self.resume_offset = data.get("current_offset")
-                    self.btn_resume.config(state=tk.NORMAL)
-                    self.lbl_scan_info.config(text=f"⚡ Checkpoint ready: {items_count} files at {last_gb:.1f} GB. Click 'Resume Last Scan' to continue!")
+                    if items_count > 0:
+                        self.btn_resume.config(state=tk.NORMAL)
+                        self.lbl_scan_info.config(text=f"⚡ Checkpoint ready: {items_count} files at {last_gb:.1f} GB. Click 'Resume Last Scan' to continue!")
             except Exception:
                 pass
 
-    def save_checkpoint(self, current_offset):
+    def save_checkpoint_atomic(self, current_offset, items_list):
         cp_path = self.get_checkpoint_path()
         try:
             temp_path = cp_path + ".tmp"
+            bak_path = cp_path + ".bak"
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump({
                     "current_offset": current_offset,
                     "timestamp": time.time(),
-                    "items": self.discovered_items
+                    "items": items_list
                 }, f)
+            if os.path.exists(cp_path):
+                try:
+                    os.replace(cp_path, bak_path)
+                except Exception:
+                    pass
             os.replace(temp_path, cp_path)
         except Exception:
             pass
@@ -375,7 +433,11 @@ class ExFatRescueApp:
     def load_checkpoint(self):
         cp_path = self.get_checkpoint_path()
         if not os.path.exists(cp_path):
-            return None
+            bak_path = cp_path + ".bak"
+            if os.path.exists(bak_path):
+                cp_path = bak_path
+            else:
+                return None
         try:
             with open(cp_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -472,17 +534,20 @@ class ExFatRescueApp:
 
     def select_all_everything(self):
         """ Selects ALL valid files across the entire indexed dataset """
+        drive_path = self.target_drive_var.get().strip()
+        max_size = get_physical_drive_size(drive_path)
+        max_clusters = max_size // CLUSTER_SIZE
+        
         self.selected_item_indices.clear()
         self.selected_count = 0
         self.selected_bytes = 0
         
         for idx, item in enumerate(self.discovered_items):
-            if not item['is_dir'] and 0 < item['data_len'] <= MAX_DISK_BYTES and item['first_cluster'] < MAX_CLUSTER:
+            if not item['is_dir'] and 0 < item['data_len'] <= max_size and item['first_cluster'] < max_clusters:
                 self.selected_item_indices.add(idx)
                 self.selected_count += 1
                 self.selected_bytes += item['data_len']
                 
-        # Update visible items
         for item_id in self.tree.get_children():
             if item_id != "overflow_notice":
                 values = list(self.tree.item(item_id, "values"))
@@ -499,15 +564,17 @@ class ExFatRescueApp:
             self.select_all_everything()
             return
             
-        added = 0
+        drive_path = self.target_drive_var.get().strip()
+        max_size = get_physical_drive_size(drive_path)
+        max_clusters = max_size // CLUSTER_SIZE
+        
         for idx, item in enumerate(self.discovered_items):
             if item['category'] == cat_filter and not item['is_dir']:
                 if idx not in self.selected_item_indices:
-                    if 0 < item['data_len'] <= MAX_DISK_BYTES and item['first_cluster'] < MAX_CLUSTER:
+                    if 0 < item['data_len'] <= max_size and item['first_cluster'] < max_clusters:
                         self.selected_item_indices.add(idx)
                         self.selected_count += 1
                         self.selected_bytes += item['data_len']
-                        added += 1
                         
         for item_id in self.tree.get_children():
             if item_id != "overflow_notice":
@@ -520,13 +587,17 @@ class ExFatRescueApp:
         self.update_selection_summary_fast()
 
     def select_all_visible(self):
+        drive_path = self.target_drive_var.get().strip()
+        max_size = get_physical_drive_size(drive_path)
+        max_clusters = max_size // CLUSTER_SIZE
+        
         for item_id in self.tree.get_children():
             if item_id == "overflow_notice":
                 continue
             idx = int(item_id)
             if idx not in self.selected_item_indices:
                 item = self.discovered_items[idx]
-                if not item['is_dir'] and 0 < item['data_len'] <= MAX_DISK_BYTES and item['first_cluster'] < MAX_CLUSTER:
+                if not item['is_dir'] and 0 < item['data_len'] <= max_size and item['first_cluster'] < max_clusters:
                     self.selected_item_indices.add(idx)
                     self.selected_count += 1
                     self.selected_bytes += item['data_len']
@@ -602,7 +673,7 @@ class ExFatRescueApp:
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
 
     # ==========================================================================
-    # Background Workers
+    # Robust Background Scanning & Recovery
     # ==========================================================================
     
     def start_scan(self):
@@ -624,8 +695,8 @@ class ExFatRescueApp:
         self.btn_stop.config(state=tk.NORMAL, bg=self.c_danger, fg="#ffffff")
         self.btn_recover.config(state=tk.DISABLED)
         
-        start_offset = 11 * 1024 * 1024 * 1024  # 11 GB
-        threading.Thread(target=self.scan_worker, args=(drive_path, start_offset), daemon=True).start()
+        start_offset = 11 * 1024 * 1024 * 1024  # 11 GB (past Win11 installer)
+        threading.Thread(target=self.scan_worker, args=(drive_path, start_offset, []), daemon=True).start()
         
     def resume_scan(self):
         if self.is_scanning or self.is_recovering:
@@ -637,6 +708,9 @@ class ExFatRescueApp:
             return
             
         drive_path = self.target_drive_var.get().strip()
+        max_size = get_physical_drive_size(drive_path)
+        max_clusters = max_size // CLUSTER_SIZE
+        
         self.discovered_items = cp.get("items", [])
         self.selected_item_indices.clear()
         self.selected_count = 0
@@ -644,7 +718,7 @@ class ExFatRescueApp:
         
         for idx, item in enumerate(self.discovered_items):
             if item.get('category') in ['Godot / Game', 'Code & Dev', '3D & Assets']:
-                if 0 < item['data_len'] <= MAX_DISK_BYTES and item['first_cluster'] < MAX_CLUSTER:
+                if 0 < item['data_len'] <= max_size and item['first_cluster'] < max_clusters:
                     self.selected_item_indices.add(idx)
                     if not item['is_dir']:
                         self.selected_count += 1
@@ -654,6 +728,11 @@ class ExFatRescueApp:
         self.update_selection_summary_fast()
         
         start_offset = cp.get("current_offset", 11 * 1024 * 1024 * 1024)
+        if start_offset >= max_size:
+            messagebox.showinfo("Completed", "This scan previously finished all sectors! All files are loaded and ready to recover.")
+            self.btn_recover.config(state=tk.NORMAL)
+            return
+
         self.is_scanning = True
         self.stop_requested = False
         self.btn_scan.config(state=tk.DISABLED, bg="#333348")
@@ -661,85 +740,112 @@ class ExFatRescueApp:
         self.btn_stop.config(state=tk.NORMAL, bg=self.c_danger, fg="#ffffff")
         self.btn_recover.config(state=tk.DISABLED)
         
-        threading.Thread(target=self.scan_worker, args=(drive_path, start_offset), daemon=True).start()
+        threading.Thread(target=self.scan_worker, args=(drive_path, start_offset, list(self.discovered_items)), daemon=True).start()
         
     def stop_action(self):
         self.stop_requested = True
-        self.lbl_footer_status.config(text="Stopping gracefully and saving checkpoint...")
+        self.btn_stop.config(state=tk.DISABLED, bg="#333348", fg=self.c_text_dim)
+        self.lbl_footer_status.config(text="Stopping scan gracefully and saving checkpoint...")
         
-    def scan_worker(self, drive_path, start_offset):
+    def scan_worker(self, drive_path, start_offset, initial_items):
         start_time = time.time()
-        end_offset   = 511 * 1024 * 1024 * 1024 # 511 GB
-        chunk_size   = 16 * 1024 * 1024         # 16 MB
+        max_drive_size = get_physical_drive_size(drive_path)
+        chunk_size = 16 * 1024 * 1024  # 16 MB
         
         try:
             drive = open(drive_path, "rb")
         except PermissionError:
             self.msg_queue.put(("error", "Permission Denied: Run as Administrator to access physical drives!"))
-            self.msg_queue.put(("scan_done", False))
+            self.msg_queue.put(("scan_stopped", start_offset))
             return
         except Exception as e:
             self.msg_queue.put(("error", f"Could not open drive: {e}"))
-            self.msg_queue.put(("scan_done", False))
+            self.msg_queue.put(("scan_stopped", start_offset))
             return
             
-        drive.seek(start_offset)
+        try:
+            drive.seek(start_offset)
+        except Exception:
+            start_offset = 11 * 1024 * 1024 * 1024
+            drive.seek(start_offset)
+            
         current = start_offset
-        seen_keys = set((item['name'], item['first_cluster'], item['data_len']) for item in self.discovered_items)
+        worker_items = list(initial_items)
+        seen_keys = set((item['name'], item['first_cluster'], item['data_len']) for item in worker_items)
         
         last_checkpoint_time = time.time()
         batch_items = []
         
         try:
-            while current < end_offset and not self.stop_requested:
-                to_read = min(chunk_size, end_offset - current)
+            while current < max_drive_size and not self.stop_requested:
+                to_read = min(chunk_size, max_drive_size - current)
+                if to_read <= 0:
+                    break
+                    
                 try:
                     buf = drive.read(to_read)
-                except OSError:
+                except (OSError, IOError):
+                    if current + chunk_size >= max_drive_size:
+                        break  # Natural end of disk
                     current += 65536
-                    drive.seek(current)
+                    try:
+                        drive.seek(current)
+                    except Exception:
+                        break
                     continue
                     
                 if not buf:
-                    break
+                    break  # Natural EOF
                     
                 idx = 0
-                while True:
+                while idx != -1:
+                    if self.stop_requested:
+                        break
                     idx = buf.find(b'\x85', idx)
                     if idx == -1:
                         break
                     if idx % 32 == 0:
-                        entry = parse_exfat_entry_set(buf, idx)
+                        entry = parse_exfat_entry_set(buf, idx, max_drive_size)
                         if entry:
                             key = (entry['name'], entry['first_cluster'], entry['data_len'])
                             if key not in seen_keys:
                                 seen_keys.add(key)
                                 entry['category'] = get_file_category(entry['name'])
                                 batch_items.append(entry)
+                                worker_items.append(entry)
                     idx += 1
                     
                 current += len(buf)
                 
-                if len(batch_items) >= 100 or (batch_items and time.time() - last_checkpoint_time > 0.25):
+                # Dispatch batch updates to UI
+                if len(batch_items) >= 100 or (batch_items and time.time() - last_checkpoint_time > 0.3):
                     self.msg_queue.put(("items_batch", batch_items))
                     batch_items = []
                     
+                # Continuous auto-save checkpoint
                 if time.time() - last_checkpoint_time > 5.0:
-                    self.save_checkpoint(current)
+                    self.save_checkpoint_atomic(current, worker_items)
                     last_checkpoint_time = time.time()
                     
-                progress = (current - 11 * 1024 * 1024 * 1024) / (end_offset - 11 * 1024 * 1024 * 1024) * 100
+                progress = min(100.0, (current - 11 * 1024 * 1024 * 1024) / max(max_drive_size - 11 * 1024 * 1024 * 1024, 1) * 100)
                 speed = ((current - start_offset) / (1024**2)) / max(time.time() - start_time, 0.001)
-                self.msg_queue.put(("scan_progress", (progress, current, speed)))
+                self.msg_queue.put(("scan_progress", (progress, current, max_drive_size, speed)))
                 
         except Exception as e:
             self.msg_queue.put(("error", f"Scan error: {e}"))
         finally:
             if batch_items:
                 self.msg_queue.put(("items_batch", batch_items))
-            self.save_checkpoint(current)
-            drive.close()
-            self.msg_queue.put(("scan_done", current))
+            self.save_checkpoint_atomic(current, worker_items)
+            try:
+                drive.close()
+            except Exception:
+                pass
+                
+            if self.stop_requested:
+                self.msg_queue.put(("scan_stopped", current))
+            else:
+                self.msg_queue.put(("scan_done", current))
             
     def start_recovery(self):
         if not self.selected_item_indices:
@@ -765,14 +871,14 @@ class ExFatRescueApp:
         
     def recovery_worker(self, drive_path, dest_dir, indices):
         os.makedirs(dest_dir, exist_ok=True)
-        
-        CLUSTER_HEAP_OFFSET = 32 * 1024 * 1024 # 32 MB
+        max_drive_size = get_physical_drive_size(drive_path)
+        max_clusters = max_drive_size // CLUSTER_SIZE
         
         try:
             drive = open(drive_path, "rb")
         except Exception as e:
             self.msg_queue.put(("error", f"Could not open drive: {e}"))
-            self.msg_queue.put(("recovery_done", False))
+            self.msg_queue.put(("recovery_done", 0))
             return
             
         recovered_count = 0
@@ -787,13 +893,13 @@ class ExFatRescueApp:
                 item = self.discovered_items[idx]
                 if item['is_dir']:
                     continue
-                if item['data_len'] <= 0 or item['data_len'] > MAX_DISK_BYTES or item['first_cluster'] >= MAX_CLUSTER:
+                if item['data_len'] <= 0 or item['data_len'] > max_drive_size or item['first_cluster'] >= max_clusters:
                     continue
                     
                 clean_name = sanitize_filename(item['name'])
                 offset = CLUSTER_HEAP_OFFSET + (item['first_cluster'] - 2) * CLUSTER_SIZE
                 
-                if offset + item['data_len'] > MAX_DISK_BYTES:
+                if offset + item['data_len'] > max_drive_size:
                     continue
                 
                 out_path = os.path.join(dest_dir, clean_name)
@@ -833,13 +939,16 @@ class ExFatRescueApp:
                 if msg_type == "items_batch":
                     cat_filter = self.category_var.get()
                     query = self.search_var.get().lower().strip()
+                    drive_path = self.target_drive_var.get().strip()
+                    max_size = get_physical_drive_size(drive_path)
+                    max_clusters = max_size // CLUSTER_SIZE
                     
                     for item in data:
                         idx = len(self.discovered_items)
                         self.discovered_items.append(item)
                         
                         if item['category'] in ['Godot / Game', 'Code & Dev', '3D & Assets']:
-                            if 0 < item['data_len'] <= MAX_DISK_BYTES and item['first_cluster'] < MAX_CLUSTER:
+                            if 0 < item['data_len'] <= max_size and item['first_cluster'] < max_clusters:
                                 self.selected_item_indices.add(idx)
                                 if not item['is_dir']:
                                     self.selected_count += 1
@@ -848,7 +957,7 @@ class ExFatRescueApp:
                         if len(self.tree.get_children()) < 2000:
                             if (cat_filter == "All" or item['category'] == cat_filter) and (not query or query in item['name'].lower()):
                                 checked = "[✓]" if idx in self.selected_item_indices else "[ ]"
-                                type_str = "Folder" if data['is_dir'] else "File"
+                                type_str = "Folder" if item['is_dir'] else "File"
                                 size_str = "-" if item['is_dir'] else format_size(item['data_len'])
                                 self.tree.insert("", tk.END, iid=str(idx), values=(
                                     checked, item['name'], item['category'], size_str, f"Cluster {item['first_cluster']}", type_str
@@ -856,19 +965,23 @@ class ExFatRescueApp:
                     self.update_selection_summary_fast()
                     
                 elif msg_type == "scan_progress":
-                    pct, curr_bytes, speed = data
+                    pct, curr_bytes, total_bytes, speed = data
                     self.progress_bar['value'] = pct
                     gb_done = curr_bytes / (1024**3)
-                    self.lbl_footer_status.config(text=f"Scanning: {gb_done:.1f}/511 GB ({pct:.1f}%) | Speed: {speed:.1f} MB/s | Discovered: {len(self.discovered_items)} files")
+                    gb_tot = total_bytes / (1024**3)
+                    self.lbl_footer_status.config(text=f"Scanning: {gb_done:.1f}/{gb_tot:.1f} GB ({pct:.1f}%) | Speed: {speed:.1f} MB/s | Discovered: {len(self.discovered_items)} files")
                     
-                elif msg_type == "scan_done":
+                elif msg_type in ("scan_done", "scan_stopped"):
                     self.is_scanning = False
                     self.btn_scan.config(state=tk.NORMAL, bg=self.c_accent)
                     self.btn_stop.config(state=tk.DISABLED, bg="#333348", fg=self.c_text_dim)
                     self.btn_recover.config(state=tk.NORMAL)
                     self.btn_resume.config(state=tk.NORMAL)
-                    self.progress_bar['value'] = 100
-                    self.lbl_footer_status.config(text=f"Scan complete! Discovered {len(self.discovered_items)} files/folders. Click 'Select ALL Files' or choose categories, then 'Recover'.")
+                    if msg_type == "scan_done":
+                        self.progress_bar['value'] = 100
+                        self.lbl_footer_status.config(text=f"Scan complete! Discovered {len(self.discovered_items)} files/folders. Click '⭐ Select ALL Files' or choose categories, then 'Recover'.")
+                    else:
+                        self.lbl_footer_status.config(text=f"Scan paused/stopped. Checkpoint saved with {len(self.discovered_items)} files. Click 'Resume' anytime or 'Recover' now.")
                     
                 elif msg_type == "recovery_progress":
                     curr, total, name = data
@@ -887,7 +1000,7 @@ class ExFatRescueApp:
                     messagebox.showinfo("Success", f"Recovery complete! Successfully recovered {data} files to:\n{self.output_dir_var.get()}")
                     
                 elif msg_type == "error":
-                    messagebox.showerror("Notice", data)
+                    self.lbl_footer_status.config(text=f"Notice: {data}")
                     
         except queue.Empty:
             pass

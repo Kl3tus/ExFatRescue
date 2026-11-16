@@ -1,8 +1,8 @@
 @echo off
 title Build ExFatRescue Standalone Executable
-echo Building ExFatRescue.exe with embedded UAC administrator manifest...
 cd /d "%~dp0"
-"C:\Users\JohnCletus\AppData\Local\Programs\Python\Python314\Scripts\pyinstaller.exe" --onefile --uac-admin --noconsole --name "ExFatRescue" exfat_rescue.py
-echo.
-echo Build complete! Executable is in: %~dp0dist\ExFatRescue.exe
-pause
+set PYTHONPATH=C:\Users\JohnCletus\AppData\Local\Programs\Python\Python314\Lib\site-packages
+python -m PyInstaller --onefile --uac-admin --noconsole --add-data "paypal_qr.png;." --name "ExFatRescue" exfat_rescue.py
+copy /y "dist\ExFatRescue.exe" "ExFatRescue.exe"
+copy /y "dist\ExFatRescue.exe" "C:\Users\JohnCletus\Desktop\ExFatRescue.exe"
+echo Build complete!
